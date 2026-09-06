@@ -12,6 +12,28 @@ import {
 const DEFAULT_MODEL = "gpt-5.6-luna";
 const DEFAULT_TIMEOUT_MS = 60_000;
 
+export type MaxTokensParameter = "max_tokens" | "max_completion_tokens";
+
+/**
+ * Select the Chat Completions token-limit field without breaking older
+ * OpenAI-compatible servers. `max_tokens` is deprecated by OpenAI and is not
+ * accepted by o-series models; newer GPT-5 models use the replacement too.
+ * An explicit env override remains available for proxies with their own
+ * compatibility rules.
+ */
+export function resolveMaxTokensParameter(
+  model: string,
+  configured?: string,
+): MaxTokensParameter {
+  if (configured === "max_tokens" || configured === "max_completion_tokens") {
+    return configured;
+  }
+
+  return /^(?:o[1-9](?:$|[-.])|gpt-5(?:$|[-.]))/i.test(model.trim())
+    ? "max_completion_tokens"
+    : "max_tokens";
+}
+
 /**
  * OpenAI-compatible LLM provider.
  *
@@ -54,6 +76,7 @@ export class OpenAIProvider implements MemoryProvider {
   private timeoutMs: number;
   private isAzure: boolean;
   private azureApiVersion: string;
+  private maxTokensParameter: MaxTokensParameter;
 
   constructor(apiKey: string, model: string, maxTokens: number, baseURL?: string) {
     this.apiKey = apiKey;
@@ -61,6 +84,10 @@ export class OpenAIProvider implements MemoryProvider {
     this.maxTokens = maxTokens;
     this.baseUrl = normalizeBaseUrl(baseURL || getEnvVar("OPENAI_BASE_URL"));
     this.reasoningEffort = getEnvVar("OPENAI_REASONING_EFFORT") || undefined;
+    this.maxTokensParameter = resolveMaxTokensParameter(
+      this.model,
+      getEnvVar("OPENAI_MAX_TOKENS_PARAM") || undefined,
+    );
     this.timeoutMs = resolveTimeout();
     this.azureApiVersion =
       getEnvVar("OPENAI_API_VERSION") || DEFAULT_AZURE_API_VERSION;
@@ -79,7 +106,6 @@ export class OpenAIProvider implements MemoryProvider {
     const url = buildChatUrl(this.baseUrl, this.isAzure, this.azureApiVersion);
     const body: Record<string, unknown> = {
       model: this.model,
-      max_tokens: this.maxTokens,
       // OpenAI API spec defines `stream` as defaulting to false, so omitting
       // it should yield a JSON response. Some OpenAI-compatible proxies
       // (notably 9Router < 0.4.56 — see decolua/9router#1260) default to
@@ -92,6 +118,7 @@ export class OpenAIProvider implements MemoryProvider {
         { role: "user", content: userPrompt },
       ],
     };
+    body[this.maxTokensParameter] = this.maxTokens;
     if (this.reasoningEffort) {
       body.reasoning_effort = this.reasoningEffort;
     }
@@ -179,4 +206,3 @@ function parsePositiveInt(raw: string | null | undefined): number | undefined {
   const n = Number(trimmed);
   return Number.isFinite(n) && n > 0 ? n : undefined;
 }
-
