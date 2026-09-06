@@ -863,6 +863,7 @@ export function registerApiTriggers(
       const hasSummary = parseBooleanQuery(params.hasSummary);
       const hasObservations = parseBooleanQuery(params.hasObservations);
       const includeSummary = parseBooleanQuery(params.includeSummary);
+      const shouldIncludeSummary = includeSummary !== false;
       if (limit === null) {
         return { status_code: 400, body: { error: "limit must be an integer between 1 and 100" } };
       }
@@ -910,7 +911,7 @@ export function registerApiTriggers(
         return {
           ...session,
           hasSummary: Boolean(summary),
-          ...(includeSummary === true && summary ? { summary } : {}),
+          ...(shouldIncludeSummary && summary ? { summary } : {}),
         };
       });
       return {
