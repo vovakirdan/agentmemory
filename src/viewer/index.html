@@ -1167,7 +1167,7 @@
       graph: { loaded: false, nodes: [], edges: [], stats: null, filters: {}, selectedNode: null, queryError: null, truncated: false, totalNodes: 0, totalEdges: 0 },
       memories: { loaded: false, items: [], search: '', typeFilter: '', selectedId: null },
       timeline: { loaded: false, observations: [], sessionId: '', minImportance: 0, page: 0, pageSize: 50 },
-      sessions: { loaded: false, items: [], selectedId: null },
+      sessions: { loaded: false, items: [], selectedId: null, nextCursor: null, filters: { project: '', status: '', hasSummary: '' } },
       audit: { loaded: false, entries: [], opFilter: '' },
       activity: { loaded: false, observations: [], sessions: [], typeFilter: '' },
       lessons: { loaded: false, items: [], search: '', selectedId: null },
@@ -3147,9 +3147,28 @@
     async function loadSessions() {
       var el = document.getElementById('view-sessions');
       if (!state.sessions.loaded) el.innerHTML = '<div class="loading">Loading sessions...</div>';
-      var result = await apiGet('sessions');
+      var f = state.sessions.filters;
+      var query = new URLSearchParams({ limit: '50', includeSummary: 'true' });
+      if (f.project) query.set('project', f.project);
+      if (f.status) query.set('status', f.status);
+      if (f.hasSummary) query.set('hasSummary', f.hasSummary);
+      var result = await apiGet('sessions?' + query.toString());
       state.sessions.items = (result && result.sessions) || [];
+      state.sessions.nextCursor = (result && result.nextCursor) || null;
       state.sessions.loaded = true;
+      renderSessions();
+    }
+
+    async function loadMoreSessions() {
+      if (!state.sessions.nextCursor) return;
+      var f = state.sessions.filters;
+      var query = new URLSearchParams({ limit: '50', cursor: state.sessions.nextCursor, includeSummary: 'true' });
+      if (f.project) query.set('project', f.project);
+      if (f.status) query.set('status', f.status);
+      if (f.hasSummary) query.set('hasSummary', f.hasSummary);
+      var result = await apiGet('sessions?' + query.toString());
+      state.sessions.items = state.sessions.items.concat((result && result.sessions) || []);
+      state.sessions.nextCursor = (result && result.nextCursor) || null;
       renderSessions();
     }
 
@@ -3159,7 +3178,13 @@
         return (b.startedAt || '').localeCompare(a.startedAt || '');
       });
 
-      var html = '<div class="sessions-layout"><div class="session-list">';
+      var html = '<div class="toolbar" style="margin-bottom:12px;">';
+      html += '<input id="sessions-project" placeholder="Project" value="' + esc(state.sessions.filters.project) + '" style="max-width:220px;">';
+      html += '<select id="sessions-status"><option value="">All statuses</option><option value="active"' + (state.sessions.filters.status === 'active' ? ' selected' : '') + '>Active</option><option value="completed"' + (state.sessions.filters.status === 'completed' ? ' selected' : '') + '>Completed</option><option value="abandoned"' + (state.sessions.filters.status === 'abandoned' ? ' selected' : '') + '>Abandoned</option></select>';
+      html += '<select id="sessions-summary"><option value="">Summary: all</option><option value="false"' + (state.sessions.filters.hasSummary === 'false' ? ' selected' : '') + '>Without summary</option><option value="true"' + (state.sessions.filters.hasSummary === 'true' ? ' selected' : '') + '>With summary</option></select>';
+      html += '<button class="btn" data-action="filter-sessions">Filter</button>';
+      html += '<button class="btn btn-primary" data-action="summarize-missing">Summarize visible missing</button></div>';
+      html += '<div class="sessions-layout"><div class="session-list">';
       if (items.length === 0) {
         html += '<div class="empty-state"><div class="empty-icon">&#128466;</div><p>No sessions</p></div>';
       } else {
@@ -3180,11 +3205,39 @@
           html += '</div></div>';
         });
       }
+      if (state.sessions.nextCursor) {
+        html += '<button class="btn" style="margin-top:12px;width:100%;" data-action="load-more-sessions">Load more sessions</button>';
+      }
       html += '</div>';
       html += '<div id="session-detail"></div></div>';
       el.innerHTML = html;
 
+      var projectInput = document.getElementById('sessions-project');
+      if (projectInput) projectInput.addEventListener('keydown', function(e) { if (e.key === 'Enter') filterSessions(); });
+
       if (state.sessions.selectedId) renderSessionDetail();
+    }
+
+    function filterSessions() {
+      state.sessions.filters = {
+        project: (document.getElementById('sessions-project') || {}).value || '',
+        status: (document.getElementById('sessions-status') || {}).value || '',
+        hasSummary: (document.getElementById('sessions-summary') || {}).value || ''
+      };
+      state.sessions.loaded = false;
+      state.sessions.nextCursor = null;
+      loadSessions();
+    }
+
+    async function summarizeMissingSessions() {
+      var missing = state.sessions.items.filter(function(s) { return !s.hasSummary && sessionId(s); });
+      if (!missing.length) return;
+      for (var i = 0; i < missing.length; i++) {
+        await apiPost('summarize', { sessionId: sessionId(missing[i]) });
+      }
+      state.sessions.loaded = false;
+      state.sessions.selectedId = null;
+      loadSessions();
     }
 
     function selectSession(id) {
@@ -4220,6 +4273,9 @@
         if (sessionId) selectSession(sessionId);
         return;
       }
+      if (action === 'filter-sessions') { filterSessions(); return; }
+      if (action === 'load-more-sessions') { loadMoreSessions(); return; }
+      if (action === 'summarize-missing') { summarizeMissingSessions(); return; }
       if (action === 'goto-tab') {
         var gotoTab = target.getAttribute('data-tab');
         if (gotoTab) switchTab(gotoTab);

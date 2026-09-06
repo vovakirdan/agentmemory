@@ -15,6 +15,12 @@ import { getBoundViewerPort, getViewerSkipped } from "../viewer/server.js";
 import { MAX_FILES_UPPER_BOUND } from "../functions/replay.js";
 import { logger } from "../logger.js";
 import {
+  decodePageCursor,
+  paginateByCursor,
+  parseBooleanQuery,
+  parsePageLimit,
+} from "../api/pagination.js";
+import {
   isGraphExtractionEnabled,
   isConsolidationEnabled,
   isAutoCompressEnabled,
@@ -851,9 +857,26 @@ export function registerApiTriggers(
       const authErr = checkAuth(req, secret);
       if (authErr) return authErr;
       const sessions = await kv.list<Session>(KV.sessions);
+      const params = req.query_params || {};
+      const limit = parsePageLimit(params.limit);
+      const cursor = decodePageCursor(params.cursor);
+      const hasSummary = parseBooleanQuery(params.hasSummary);
+      const hasObservations = parseBooleanQuery(params.hasObservations);
+      const includeSummary = parseBooleanQuery(params.includeSummary);
+      if (limit === null) {
+        return { status_code: 400, body: { error: "limit must be an integer between 1 and 100" } };
+      }
+      if (cursor === null) return { status_code: 400, body: { error: "cursor is invalid" } };
+      if (hasSummary === null || hasObservations === null || includeSummary === null) {
+        return { status_code: 400, body: { error: "hasSummary, hasObservations, and includeSummary must be true or false" } };
+      }
+      const status = params.status?.trim();
+      if (status && !["active", "completed", "abandoned"].includes(status)) {
+        return { status_code: 400, body: { error: "status must be active, completed, or abandoned" } };
+      }
       const normalizedAgentId =
-        typeof req.query_params?.["agentId"] === "string"
-          ? req.query_params["agentId"].trim()
+        typeof params.agentId === "string"
+          ? params.agentId.trim()
           : undefined;
       const wildcardAgent = normalizedAgentId === "*";
       const explicitAgentId =
@@ -862,28 +885,43 @@ export function registerApiTriggers(
         ? undefined
         : explicitAgentId ??
           (isAgentScopeIsolated() ? getAgentId() : undefined);
-      const filtered = filterAgentId
+      const scoped = filterAgentId
         ? sessions.filter((s) => s.agentId === filterAgentId)
         : sessions;
-      // Bounded fan-out: each kv.get is a full engine invocation, so
-      // Promise.all over hundreds of sessions saturates the invocation
-      // pool. Batch in chunks of 10 (parallel within a chunk, sequential
-      // across chunks); the summaries array stays index-aligned with
-      // `filtered`.
-      const summaries: Array<SessionSummary | null> = [];
-      for (let batch = 0; batch < filtered.length; batch += 10) {
-        const chunk = filtered.slice(batch, batch + 10);
-        const results = await Promise.all(
-          chunk.map((s) =>
-            kv.get<SessionSummary>(KV.summaries, s.id).catch(() => null),
-          ),
-        );
-        summaries.push(...results);
-      }
-      const withSummary = filtered.map((s, i) =>
-        summaries[i] ? { ...s, summary: summaries[i] } : s,
+      const summaryList = await kv.list<SessionSummary>(KV.summaries);
+      const summaryBySession = new Map(summaryList.map((summary) => [summary.sessionId, summary]));
+      const filtered = scoped.filter((session) => {
+        const summary = summaryBySession.has(session.id);
+        if (params.project && session.project !== params.project.trim()) return false;
+        if (status && session.status !== status) return false;
+        if (hasSummary !== undefined && summary !== hasSummary) return false;
+        if (hasObservations !== undefined && (session.observationCount > 0) !== hasObservations) return false;
+        return true;
+      });
+      const page = paginateByCursor(
+        filtered,
+        (session) => session.startedAt || "",
+        (session) => session.id,
+        limit,
+        cursor ?? undefined,
       );
-      return { status_code: 200, body: { sessions: withSummary } };
+      const pageSessions = page.items.map((session) => {
+        const summary = summaryBySession.get(session.id);
+        return {
+          ...session,
+          hasSummary: Boolean(summary),
+          ...(includeSummary === true && summary ? { summary } : {}),
+        };
+      });
+      return {
+        status_code: 200,
+        body: {
+          sessions: pageSessions,
+          nextCursor: page.nextCursor ?? null,
+          hasMore: page.hasMore,
+          total: filtered.length,
+        },
+      };
     },
   );
   sdk.registerTrigger({
@@ -899,12 +937,19 @@ export function registerApiTriggers(
       const sessionId = asNonEmptyString(req.query_params?.["sessionId"]);
       if (!sessionId)
         return { status_code: 400, body: { error: "sessionId required" } };
+      const params = req.query_params || {};
+      const limit = parsePageLimit(params.limit);
+      const cursor = decodePageCursor(params.cursor);
+      if (limit === null) {
+        return { status_code: 400, body: { error: "limit must be an integer between 1 and 100" } };
+      }
+      if (cursor === null) return { status_code: 400, body: { error: "cursor is invalid" } };
       const observations = await kv.list<CompressedObservation>(
         KV.observations(sessionId),
       );
       const normalizedAgentId =
-        typeof req.query_params?.["agentId"] === "string"
-          ? req.query_params["agentId"].trim()
+        typeof params.agentId === "string"
+          ? params.agentId.trim()
           : undefined;
       const wildcardAgent = normalizedAgentId === "*";
       const explicitAgentId =
@@ -916,7 +961,22 @@ export function registerApiTriggers(
       const filtered = filterAgentId
         ? observations.filter((o) => o.agentId === filterAgentId)
         : observations;
-      return { status_code: 200, body: { observations: filtered } };
+      const page = paginateByCursor(
+        filtered,
+        (observation) => observation.timestamp || "",
+        (observation) => observation.id,
+        limit,
+        cursor ?? undefined,
+      );
+      return {
+        status_code: 200,
+        body: {
+          observations: page.items,
+          nextCursor: page.nextCursor ?? null,
+          hasMore: page.hasMore,
+          total: filtered.length,
+        },
+      };
     },
   );
   sdk.registerTrigger({
