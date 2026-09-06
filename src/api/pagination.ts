@@ -46,19 +46,19 @@ export function decodePageCursor(raw: string | undefined): PageCursor | undefine
 
 export function paginateByCursor<T>(
   items: T[],
-  getSortKey: (item: T) => string,
-  getId: (item: T) => string,
+  getSortKey: (item: T) => string | undefined,
+  getId: (item: T) => string | undefined,
   limit: number,
   cursor?: PageCursor,
 ): Page<T> {
   const sorted = [...items].sort((a, b) => {
-    const keyOrder = getSortKey(b).localeCompare(getSortKey(a));
-    return keyOrder || getId(b).localeCompare(getId(a));
+    const keyOrder = (getSortKey(b) ?? "").localeCompare(getSortKey(a) ?? "");
+    return keyOrder || (getId(b) ?? "").localeCompare(getId(a) ?? "");
   });
   const start = cursor
     ? sorted.findIndex((item) => {
-        const key = getSortKey(item);
-        const id = getId(item);
+        const key = getSortKey(item) ?? "";
+        const id = getId(item) ?? "";
         return key < cursor.sortKey || (key === cursor.sortKey && id < cursor.id);
       })
     : 0;
@@ -70,7 +70,7 @@ export function paginateByCursor<T>(
     items: pageItems,
     hasMore,
     ...(hasMore && last
-      ? { nextCursor: encodePageCursor({ sortKey: getSortKey(last), id: getId(last) }) }
+      ? { nextCursor: encodePageCursor({ sortKey: getSortKey(last) ?? "", id: getId(last) ?? "" }) }
       : {}),
   };
 }

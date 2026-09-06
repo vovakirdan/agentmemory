@@ -43,4 +43,14 @@ describe("API pagination helpers", () => {
     expect(next.items.map((item) => item.id)).toEqual(["a"]);
     expect(next.hasMore).toBe(false);
   });
+
+  it("handles legacy records with missing sort fields", () => {
+    const page = paginateByCursor(
+      [{ id: "ok", at: "2026-09-06T00:00:00.000Z" }, { id: undefined, at: undefined }] as Array<{ id?: string; at?: string }>,
+      (item) => item.at,
+      (item) => item.id,
+      10,
+    );
+    expect(page.items).toHaveLength(2);
+  });
 });
