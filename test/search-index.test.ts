@@ -46,6 +46,29 @@ describe("SearchIndex", () => {
     expect(index.search("database")).toEqual([]);
   });
 
+  it("repeating an upsert preserves the index and BM25 scores", () => {
+    const observation = makeObs();
+    index.add(observation);
+    index.add(makeObs({ id: "obs_other", title: "another document" }));
+    const snapshot = index.serialize();
+    const results = index.search("auth");
+    index.add(observation);
+    expect(index.serialize()).toBe(snapshot);
+    expect(index.search("auth")).toEqual(results);
+  });
+
+  it("updating and deleting an id removes old exact and prefix postings", () => {
+    index.add(makeObs({ title: "quartzunique", narrative: "quartzunique" }));
+    expect(index.search("quartzun")).toHaveLength(1);
+    index.add(makeObs({ title: "saffronunique", narrative: "saffronunique" }));
+    expect(index.search("quartzunique")).toEqual([]);
+    expect(index.search("quartzun")).toEqual([]);
+    index.add(makeObs({ id: "obs_other", title: "saffronunique" }));
+    index.remove("obs_1");
+    expect(index.search("quartzunique")).toEqual([]);
+    expect(index.search("saffronunique").map((hit) => hit.obsId)).toEqual(["obs_other"]);
+  });
+
   it("scores exact matches higher than prefix matches", () => {
     index.add(
       makeObs({

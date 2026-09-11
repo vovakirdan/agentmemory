@@ -32,6 +32,7 @@ import { StateKV } from "../state/kv.js";
 import { VERSION } from "../version.js";
 import { recordAudit } from "./audit.js";
 import { indexRecords } from "./search.js";
+import { invalidStrictImport, strictImportIndexing, validateStrictImport } from "./import-indexing.js";
 import { resetLessonIndex } from "./lessons.js";
 import { logger } from "../logger.js";
 
@@ -205,7 +206,11 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
     async (data: {
       exportData: ExportData;
       strategy?: "merge" | "replace" | "skip";
+      strictIndexing?: boolean;
     }) => {
+      if (data?.strictIndexing !== undefined && typeof data.strictIndexing !== "boolean") {
+        return invalidStrictImport("strictIndexing must be a boolean");
+      }
       if (
         !data?.exportData ||
         typeof data.exportData !== "object" ||
@@ -302,6 +307,11 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
         summaries: 0,
         skipped: 0,
       };
+
+      if (data.strictIndexing) {
+        const error = validateStrictImport(importData, data.strategy === undefined ? "merge" : data.strategy);
+        if (error) return error;
+      }
 
       if (strategy === "replace") {
         const existing = await kv.list<Session>(KV.sessions);
@@ -661,12 +671,17 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
       // rather than one giant Promise.all over 500k docs. Indexing
       // failures are logged, not fatal — the KV writes already committed
       // and the restart rebuild is the backstop.
-      try {
-        await indexRecords(indexObs, indexMems);
-      } catch (err) {
-        logger.warn("Import indexing failed; restart rebuild will recover", {
-          error: err instanceof Error ? err.message : String(err),
-        });
+      let strictResult: Awaited<ReturnType<typeof strictImportIndexing>> | undefined;
+      if (data.strictIndexing) {
+        strictResult = await strictImportIndexing(indexObs, indexMems);
+      } else {
+        try {
+          await indexRecords(indexObs, indexMems);
+        } catch (err) {
+          logger.warn("Import indexing failed; restart rebuild will recover", {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
       }
 
       logger.info("Import complete", { strategy, ...stats });
@@ -674,7 +689,7 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
         strategy,
         stats,
       });
-      return { success: true, strategy, ...stats };
+      return { success: true, strategy, ...stats, ...strictResult };
     },
   );
 }

@@ -77,17 +77,21 @@ export function vectorIndexRemove(id: string): void {
 // isolation don't need to wire persistence.
 let indexPersistence: {
   scheduleSave: () => void;
-  save: () => Promise<void>;
+  save: (options?: { strict?: boolean }) => Promise<void>;
 } | null = null;
 
 export function setIndexPersistence(
-  p: { scheduleSave: () => void; save: () => Promise<void> } | null,
+  p: { scheduleSave: () => void; save: (options?: { strict?: boolean }) => Promise<void> } | null,
 ): void {
   indexPersistence = p;
 }
 
 export function scheduleIndexSave(): void {
   indexPersistence?.scheduleSave();
+}
+
+export function hasIndexPersistence(): boolean {
+  return indexPersistence !== null;
 }
 
 // Synchronous flush variant for delete paths. The debounced
@@ -99,8 +103,12 @@ export function scheduleIndexSave(): void {
 // even when persistence fails — callers must not treat a failed
 // flush as a fatal error on the delete itself (the KV delete already
 // committed before this is invoked).
-export async function flushIndexSave(): Promise<void> {
-  await indexPersistence?.save();
+export async function flushIndexSave(options?: { strict?: boolean }): Promise<void> {
+  if (options?.strict && !indexPersistence) {
+    throw new Error("Index persistence is unavailable");
+  }
+  if (options) await indexPersistence?.save(options);
+  else await indexPersistence?.save();
 }
 
 // Hard cap on embedding input length. Most providers cap input around
@@ -132,8 +140,8 @@ export async function vectorIndexAddGuarded(
   if (!vi || !ep) return false
   try {
     const embedding = await ep.embed(clipEmbedInput(text))
-    if (embedding.length !== ep.dimensions) {
-      logger.warn("vector-index add: dimension mismatch — skipping", {
+    if (embedding.length !== ep.dimensions || !embedding.every(Number.isFinite)) {
+      logger.warn("vector-index add: invalid embedding — skipping", {
         kind: context.kind,
         id: context.logId,
         provider: ep.name,
@@ -206,8 +214,8 @@ export async function vectorIndexAddBatchGuarded(
   for (let i = 0; i < items.length; i++) {
     const item = items[i]
     const embedding = embeddings[i]
-    if (embedding.length !== ep.dimensions) {
-      logger.warn("vector-index add batch: dimension mismatch — skipping item", {
+    if (embedding.length !== ep.dimensions || !embedding.every(Number.isFinite)) {
+      logger.warn("vector-index add batch: invalid embedding — skipping item", {
         kind: item.context.kind,
         id: item.context.logId,
         provider: ep.name,
@@ -255,9 +263,15 @@ function getRebuildEmbedBatchSize(): number {
 // first; importers add. When no embedding provider is configured it skips
 // the vector enqueue entirely, so a keyless install never allocates embed
 // jobs it would immediately discard.
+export interface IndexingProgress {
+  bm25Indexed: number;
+  vectorIndexed: number;
+}
+
 export async function indexRecords(
   observations: CompressedObservation[],
   memories: Memory[],
+  progress?: IndexingProgress,
 ): Promise<number> {
   const idx = getSearchIndex()
   const vectorEnabled = Boolean(vectorIndex && currentEmbeddingProvider)
@@ -271,7 +285,8 @@ export async function indexRecords(
   const pending: EmbedJob[] = []
   const flush = async (): Promise<void> => {
     if (pending.length === 0) return
-    await vectorIndexAddBatchGuarded(pending)
+    const result = await vectorIndexAddBatchGuarded(pending)
+    if (progress) progress.vectorIndexed += result.ok
     pending.length = 0
   }
   const enqueue = async (job: EmbedJob): Promise<void> => {
@@ -285,6 +300,7 @@ export async function indexRecords(
     if (memory.isLatest === false) continue
     if (!memory.title || !memory.content) continue
     idx.add(memoryToObservation(memory))
+    if (progress) progress.bm25Indexed++
     await enqueue({
       id: memory.id,
       sessionId: memory.sessionIds?.[0] ?? 'memory',
@@ -296,6 +312,7 @@ export async function indexRecords(
   for (const obs of observations) {
     if (!obs.title || !obs.narrative) continue
     idx.add(obs)
+    if (progress) progress.bm25Indexed++
     await enqueue({
       id: obs.id,
       sessionId: obs.sessionId,

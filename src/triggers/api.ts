@@ -1406,6 +1406,7 @@ export function registerApiTriggers(
       req: ApiRequest<{
         exportData: unknown;
         strategy?: "merge" | "replace" | "skip";
+        strictIndexing?: boolean;
       }>,
     ): Promise<Response> => {
       const authErr = checkAuth(req, secret);
@@ -1413,8 +1414,19 @@ export function registerApiTriggers(
       if (!req.body?.exportData) {
         return { status_code: 400, body: { error: "exportData is required" } };
       }
-      const result = await sdk.trigger({ function_id: "mem::import", payload: req.body });
-      return { status_code: 200, body: result };
+      if (req.body.strictIndexing !== undefined && typeof req.body.strictIndexing !== "boolean") {
+        return { status_code: 400, body: { error: "strictIndexing must be a boolean" } };
+      }
+      const result = await sdk.trigger({ function_id: "mem::import", payload: {
+        exportData: req.body.exportData,
+        strategy: req.body.strategy,
+        strictIndexing: req.body.strictIndexing,
+      } });
+      const outcome = result as { success?: boolean; code?: string };
+      const status = req.body.strictIndexing && outcome.success === false
+        ? outcome.code && outcome.code !== "INVALID_STRICT_IMPORT" ? 503 : 400
+        : 200;
+      return { status_code: status, body: result };
     },
   );
   sdk.registerTrigger({
